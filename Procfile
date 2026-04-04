@@ -1,1 +1,1 @@
-worker: python -u polymarket_watcher.py
+web: python -u dashboard.py

@@ -2,5 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python -u polymarket_watcher.py"
+startCommand = "python -u dashboard.py"
 restartPolicyType = "always"
