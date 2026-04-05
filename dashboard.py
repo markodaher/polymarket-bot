@@ -29,6 +29,12 @@ app = Flask(__name__)
 LOG_FILE      = watcher.LOG_FILE
 GAPS_FILE     = watcher.GAPS_FILE
 RESOLVED_FILE = watcher.RESOLVED_FILE
+SIGNALS_FILE  = os.path.join(os.environ.get("DATA_DIR", "."), "signals.csv")
+SIGNAL_HEADERS = [
+    "timestamp", "market_id", "question",
+    "polymarket_price", "claude_estimate", "edge",
+    "recommended_side", "confidence",
+]
 
 # ─── SHARED WATCHER STATE ────────────────────────────────────────────────────
 
@@ -38,7 +44,7 @@ _state_lock       = threading.Lock()
 
 # ─── HTML TEMPLATE ───────────────────────────────────────────────────────────
 
-def render_page(total_rows, last_markets, recent_gaps, recent_resolved):
+def render_page(total_rows, last_markets, recent_gaps, recent_resolved, recent_signals=None):
     rows_html = "".join(
         f"<tr><td>{r['timestamp']}</td><td class='q'>{r['question']}</td>"
         f"<td>{r['yes_price']}</td><td>{r['no_price']}</td>"
@@ -61,6 +67,20 @@ def render_page(total_rows, last_markets, recent_gaps, recent_resolved):
         f"<td>{outcome_badge(r)}</td><td>{r['final_yes_price']}</td></tr>"
         for r in recent_resolved
     ) or "<tr><td colspan='4' class='none'>No resolved markets yet</td></tr>"
+
+    def side_badge(s):
+        cls = "yes" if s == "YES" else "no"
+        return f"<span class='{cls}'>{s}</span>"
+
+    signals_html = "".join(
+        f"<tr><td>{s['timestamp']}</td><td class='q'>{s['question']}</td>"
+        f"<td>{float(s['polymarket_price']):.2f}</td>"
+        f"<td>{float(s['claude_estimate']):.2f}</td>"
+        f"<td class='{'up' if float(s['edge']) > 0 else 'dn'}'>{float(s['edge']):+.2f}</td>"
+        f"<td>{side_badge(s['recommended_side'])}</td>"
+        f"<td>{float(s['confidence']):.2f}</td></tr>"
+        for s in (recent_signals or [])
+    ) or "<tr><td colspan='7' class='none'>No signals yet</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -94,9 +114,11 @@ def render_page(total_rows, last_markets, recent_gaps, recent_resolved):
 <div class="sub">Auto-refreshes every 30 s &nbsp;·&nbsp; {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</div>
 <nav>
   <a href="/health">⚡ Health</a>
+  <a href="/signals">📡 Signals</a>
   <a href="/download/logs">⬇ logs.csv</a>
   <a href="/download/gaps">⬇ gaps.csv</a>
   <a href="/download/resolved">⬇ resolved.csv</a>
+  <a href="/download/signals">⬇ signals.csv</a>
 </nav>
 
 <h2>Total rows logged &nbsp;<span class="badge">{total_rows:,}</span></h2>
@@ -117,6 +139,12 @@ def render_page(total_rows, last_markets, recent_gaps, recent_resolved):
 <table>
   <tr><th>Resolved at (UTC)</th><th>Question</th><th>Outcome</th><th>Final YES price</th></tr>
   {resolved_html}
+</table>
+
+<h2>Recent trade signals</h2>
+<table>
+  <tr><th>Timestamp (UTC)</th><th>Question</th><th>Mkt price</th><th>Claude est.</th><th>Edge</th><th>Side</th><th>Conf</th></tr>
+  {signals_html}
 </table>
 </body>
 </html>"""
@@ -150,10 +178,12 @@ def index():
     last_markets, total_rows = read_csv_tail(LOG_FILE,      watcher.LOG_HEADERS,      5)
     recent_gaps,  _          = read_csv_tail(GAPS_FILE,     watcher.GAP_HEADERS,     10)
     recent_resolved, _       = read_csv_tail(RESOLVED_FILE, watcher.RESOLVED_HEADERS, 10)
+    recent_signals, _        = read_csv_tail(SIGNALS_FILE,  SIGNAL_HEADERS,           20)
     last_markets    = list(reversed(last_markets))
     recent_gaps     = list(reversed(recent_gaps))
     recent_resolved = list(reversed(recent_resolved))
-    return render_page(total_rows, last_markets, recent_gaps, recent_resolved)
+    recent_signals  = list(reversed(recent_signals))
+    return render_page(total_rows, last_markets, recent_gaps, recent_resolved, recent_signals)
 
 
 @app.route("/health")
@@ -215,6 +245,71 @@ def download_gaps():
 @app.route("/download/resolved")
 def download_resolved():
     return _send_csv(RESOLVED_FILE, "polymarket_resolved.csv")
+
+@app.route("/download/signals")
+def download_signals():
+    return _send_csv(SIGNALS_FILE, "signals.csv")
+
+@app.route("/signals")
+def signals_page():
+    recent_signals, total = read_csv_tail(SIGNALS_FILE, SIGNAL_HEADERS, 20)
+    recent_signals = list(reversed(recent_signals))
+
+    def side_badge(s):
+        cls = "yes" if s == "YES" else "no"
+        return f"<span class='{cls}'>{s}</span>"
+
+    rows_html = "".join(
+        f"<tr><td>{s['timestamp']}</td><td class='q'>{s['question']}</td>"
+        f"<td>{float(s['polymarket_price']):.2f}</td>"
+        f"<td>{float(s['claude_estimate']):.2f}</td>"
+        f"<td class='{'up' if float(s['edge']) > 0 else 'dn'}'>{float(s['edge']):+.2f}</td>"
+        f"<td>{side_badge(s['recommended_side'])}</td>"
+        f"<td>{float(s['confidence']):.2f}</td></tr>"
+        for s in recent_signals
+    ) or "<tr><td colspan='7' class='none'>No signals yet</td></tr>"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="30">
+<title>Trade Signals — Polymarket</title>
+<style>
+  body {{ font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 2rem; }}
+  h1   {{ color: #58a6ff; margin-bottom: .25rem; }}
+  .sub {{ color: #8b949e; font-size: .85rem; margin-bottom: 2rem; }}
+  h2   {{ color: #58a6ff; margin: 1.5rem 0 .5rem; }}
+  table {{ border-collapse: collapse; width: 100%; max-width: 960px; }}
+  th, td {{ text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #21262d; font-size: .85rem; }}
+  th   {{ color: #8b949e; }}
+  .q   {{ max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .up  {{ color: #3fb950; }}
+  .dn  {{ color: #f85149; }}
+  .yes {{ color: #3fb950; font-weight: bold; }}
+  .no  {{ color: #f85149; font-weight: bold; }}
+  .badge {{ display: inline-block; background: #1f6feb; color: #fff;
+            padding: .2rem .6rem; border-radius: 12px; font-size: 1rem; }}
+  .none {{ color: #8b949e; }}
+  nav  {{ margin-bottom: 1.5rem; font-size: .85rem; }}
+  nav a {{ color: #58a6ff; margin-right: 1.2rem; text-decoration: none; }}
+  nav a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>Trade Signals</h1>
+<div class="sub">Auto-refreshes every 30 s &nbsp;·&nbsp; {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</div>
+<nav>
+  <a href="/">⬅ Dashboard</a>
+  <a href="/download/signals">⬇ signals.csv</a>
+</nav>
+<h2>Last 20 signals &nbsp;<span class="badge">{total:,} total</span></h2>
+<table>
+  <tr><th>Timestamp (UTC)</th><th>Question</th><th>Mkt price</th><th>Claude est.</th><th>Edge</th><th>Side</th><th>Conf</th></tr>
+  {rows_html}
+</table>
+</body>
+</html>"""
 
 
 @app.route("/upload/resolved", methods=["GET", "POST"])
