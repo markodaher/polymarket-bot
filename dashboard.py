@@ -9,7 +9,7 @@ import os
 import csv
 import threading
 from datetime import datetime, timezone
-from flask import Flask
+from flask import Flask, send_file
 import polymarket_watcher as watcher
 
 app = Flask(__name__)
@@ -113,6 +113,17 @@ def index():
     recent_gaps     = list(reversed(recent_gaps))
     recent_resolved = list(reversed(recent_resolved))
     return render_page(total_rows, last_markets, recent_gaps, recent_resolved)
+
+@app.route("/download/resolved")
+def download_resolved():
+    if not os.path.exists(RESOLVED_FILE):
+        return "polymarket_resolved.csv not found", 404
+    return send_file(
+        os.path.abspath(RESOLVED_FILE),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="polymarket_resolved.csv",
+    )
 
 # ─── BACKGROUND WATCHER ──────────────────────────────────────────────────────
 
