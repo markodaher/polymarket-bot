@@ -217,8 +217,27 @@ def download_resolved():
     return _send_csv(RESOLVED_FILE, "polymarket_resolved.csv")
 
 
-@app.route("/upload/resolved", methods=["POST"])
+@app.route("/upload/resolved", methods=["GET", "POST"])
 def upload_resolved():
+    if request.method == "GET":
+        return """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Upload resolved CSV</title>
+<style>body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:2rem;}
+input,button{margin-top:1rem;display:block;}
+button{background:#1f6feb;color:#fff;border:none;padding:.4rem 1rem;cursor:pointer;}</style>
+</head><body>
+<h2>Upload polymarket_resolved.csv</h2>
+<form method="POST" enctype="multipart/form-data">
+  <label>Select CSV file:</label>
+  <input type="file" name="file" accept=".csv">
+  <button type="submit">Upload &amp; Append</button>
+</form>
+<p style="color:#8b949e;font-size:.85rem">
+  Columns must be: market_id, question, resolved_at, outcome, final_yes_price<br>
+  Duplicate market_ids are skipped automatically.
+</p>
+</body></html>"""
+
     if "file" not in request.files:
         return jsonify({"error": "no file field in request"}), 400
 
