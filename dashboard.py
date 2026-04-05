@@ -10,6 +10,7 @@ Endpoints:
     /download/logs       — download polymarket_log.csv
     /download/gaps       — download polymarket_gaps.csv
     /download/resolved   — download polymarket_resolved.csv
+    /upload/resolved     — POST a CSV file to append rows to polymarket_resolved.csv
 """
 
 import csv
@@ -18,7 +19,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify, request, send_file
 
 import backfill_resolved
 import polymarket_watcher as watcher
@@ -214,6 +215,52 @@ def download_gaps():
 @app.route("/download/resolved")
 def download_resolved():
     return _send_csv(RESOLVED_FILE, "polymarket_resolved.csv")
+
+
+@app.route("/upload/resolved", methods=["POST"])
+def upload_resolved():
+    if "file" not in request.files:
+        return jsonify({"error": "no file field in request"}), 400
+
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "empty filename"}), 400
+
+    try:
+        text = f.read().decode("utf-8")
+        reader = csv.DictReader(text.splitlines())
+    except Exception as e:
+        return jsonify({"error": f"could not parse CSV: {e}"}), 400
+
+    # Validate columns match expected headers
+    if reader.fieldnames != watcher.RESOLVED_HEADERS:
+        return jsonify({
+            "error": "CSV columns do not match expected headers",
+            "expected": watcher.RESOLVED_HEADERS,
+            "got": list(reader.fieldnames or []),
+        }), 400
+
+    # Load existing market IDs to skip duplicates
+    _, existing_rows = read_csv_tail(RESOLVED_FILE, watcher.RESOLVED_HEADERS, n=0)
+    existing_ids: set = set()
+    if os.path.exists(RESOLVED_FILE):
+        with open(RESOLVED_FILE, newline="", encoding="utf-8") as ef:
+            for row in csv.DictReader(ef):
+                existing_ids.add(row["market_id"])
+
+    watcher.init_csv(RESOLVED_FILE, watcher.RESOLVED_HEADERS)
+
+    appended = 0
+    skipped = 0
+    for row in reader:
+        if row.get("market_id") in existing_ids:
+            skipped += 1
+            continue
+        watcher.append_row(RESOLVED_FILE, watcher.RESOLVED_HEADERS, row)
+        existing_ids.add(row["market_id"])
+        appended += 1
+
+    return jsonify({"appended": appended, "skipped_duplicates": skipped}), 200
 
 # ─── BACKGROUND WATCHER (with auto-restart) ──────────────────────────────────
 
