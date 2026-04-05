@@ -9,8 +9,9 @@ Usage:
     python polymarket_watcher.py
 
 Output:
-    polymarket_log.csv  — one row per market per poll cycle
-    polymarket_gaps.csv — logs when price moves > ALERT_THRESHOLD in one cycle
+    polymarket_log.csv      — one row per market per poll cycle
+    polymarket_gaps.csv     — logs when price moves > ALERT_THRESHOLD in one cycle
+    polymarket_resolved.csv — logs markets that have resolved with their outcome
 """
 
 import requests
@@ -25,8 +26,10 @@ from datetime import datetime, timezone
 POLL_INTERVAL_SECONDS = 30        # how often to poll (30s is polite, don't go below 10)
 LOG_FILE = "polymarket_log.csv"
 GAPS_FILE = "polymarket_gaps.csv"
+RESOLVED_FILE = "polymarket_resolved.csv"
 ALERT_THRESHOLD = 0.05            # flag moves >= 5 cents in one cycle
 MAX_MARKETS = 50                  # how many markets to track per poll
+RESOLVE_CHECK_AFTER = 3          # cycles a market must be absent before checking resolution
 
 # Filter by tag — options: "sports", "crypto", "politics", "business", None (all)
 FILTER_TAG = None
@@ -55,6 +58,20 @@ def fetch_markets(tag=None, limit=50):
         print(f"[ERROR] Failed to fetch markets: {e}")
         return []
 
+def fetch_market_by_id(condition_id):
+    """Fetch a single market by conditionId regardless of active/closed state."""
+    try:
+        resp = requests.get(
+            f"{GAMMA_API}/markets",
+            params={"conditionId": condition_id},
+            timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data[0] if data else None
+    except Exception:
+        return None
+
 def fetch_market_prices(condition_id):
     """
     Fetch current YES price for a specific market via CLOB API.
@@ -75,8 +92,9 @@ def fetch_market_prices(condition_id):
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
-LOG_HEADERS = ["timestamp", "market_id", "question", "tag", "yes_price", "no_price", "volume"]
-GAP_HEADERS = ["timestamp", "market_id", "question", "prev_yes", "curr_yes", "move"]
+LOG_HEADERS      = ["timestamp", "market_id", "question", "tag", "yes_price", "no_price", "volume"]
+GAP_HEADERS      = ["timestamp", "market_id", "question", "prev_yes", "curr_yes", "move"]
+RESOLVED_HEADERS = ["market_id", "question", "resolved_at", "outcome", "final_yes_price"]
 
 def init_csv(filepath, headers):
     """Create CSV with headers if it doesn't exist."""
@@ -91,6 +109,62 @@ def append_row(filepath, headers, row):
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writerow(row)
 
+# ─── RESOLUTION TRACKING ─────────────────────────────────────────────────────
+
+def check_resolutions(candidates, market_questions, resolved_ids, now):
+    """
+    For each candidate market_id, fetch it and check if it has closed.
+    Logs resolved markets to RESOLVED_FILE. Returns the set of newly resolved IDs.
+    """
+    newly_resolved = set()
+    for market_id in candidates:
+        if market_id in resolved_ids:
+            continue
+        m = fetch_market_by_id(market_id)
+        if not m:
+            continue
+        if not m.get("closed", False):
+            continue
+
+        raw_prices = m.get("outcomePrices")
+        if not raw_prices:
+            continue
+        try:
+            prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+            final_yes = round(float(prices[0]), 4)
+        except Exception:
+            continue
+
+        # Voided/cancelled markets have both prices at 0 — skip them
+        try:
+            final_no = round(float(prices[1]), 4)
+        except Exception:
+            continue
+        if abs((final_yes + final_no) - 1.0) > 0.05:
+            continue  # voided, cancelled, or not cleanly resolved
+
+        # Resolved binary markets land at exactly 1.0 (YES) or 0.0 (NO)
+        if final_yes >= 0.99:
+            outcome = 1.0
+        elif final_yes <= 0.01:
+            outcome = 0.0
+        else:
+            continue  # partial resolution, skip
+
+        question = market_questions.get(market_id, m.get("question", ""))[:80]
+        append_row(RESOLVED_FILE, RESOLVED_HEADERS, {
+            "market_id"      : market_id,
+            "question"       : question,
+            "resolved_at"    : now,
+            "outcome"        : outcome,
+            "final_yes_price": final_yes,
+        })
+        newly_resolved.add(market_id)
+        result = "YES ✓" if outcome == 1.0 else "NO  ✗"
+        print(f"  [RESOLVED] {result} | {question[:55]}")
+
+    return newly_resolved
+
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 
 def main():
@@ -100,14 +174,18 @@ def main():
     print(f"  Poll every : {POLL_INTERVAL_SECONDS}s")
     print(f"  Log file   : {LOG_FILE}")
     print(f"  Gap alerts : {GAPS_FILE} (moves >= {ALERT_THRESHOLD*100:.0f}¢)")
+    print(f"  Resolved   : {RESOLVED_FILE}")
     print("  Ctrl+C to stop")
     print("=" * 55)
 
     init_csv(LOG_FILE, LOG_HEADERS)
     init_csv(GAPS_FILE, GAP_HEADERS)
+    init_csv(RESOLVED_FILE, RESOLVED_HEADERS)
 
-    # Track previous prices to detect gaps
-    prev_prices = {}   # { market_id: yes_price }
+    prev_prices      = {}   # { market_id: yes_price }
+    last_seen        = {}   # { market_id: cycle }      — last cycle it appeared in feed
+    market_questions = {}   # { market_id: question }   — for resolution log
+    resolved_ids     = set()
     cycle = 0
 
     while True:
@@ -175,9 +253,24 @@ def main():
                     print(f"  {direction} GAP {move:+.4f} | {question[:50]}")
                     alerts += 1
 
-            prev_prices[market_id] = yes_price
+            prev_prices[market_id]       = yes_price
+            last_seen[market_id]         = cycle
+            market_questions[market_id]  = question
 
-        print(f"  Logged {logged} markets | {alerts} gaps detected")
+        # Check resolution for markets absent from feed long enough
+        candidates = [
+            mid for mid, last_cycle in last_seen.items()
+            if cycle - last_cycle >= RESOLVE_CHECK_AFTER and mid not in resolved_ids
+        ]
+        if candidates:
+            newly_resolved = check_resolutions(candidates, market_questions, resolved_ids, now)
+            resolved_ids.update(newly_resolved)
+            # Clean up tracking for resolved markets
+            for mid in newly_resolved:
+                prev_prices.pop(mid, None)
+                last_seen.pop(mid, None)
+
+        print(f"  Logged {logged} markets | {alerts} gaps | {len(resolved_ids)} resolved total")
         time.sleep(POLL_INTERVAL_SECONDS)
 
 

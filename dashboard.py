@@ -14,12 +14,13 @@ import polymarket_watcher as watcher
 
 app = Flask(__name__)
 
-LOG_FILE  = watcher.LOG_FILE
-GAPS_FILE = watcher.GAPS_FILE
+LOG_FILE      = watcher.LOG_FILE
+GAPS_FILE     = watcher.GAPS_FILE
+RESOLVED_FILE = watcher.RESOLVED_FILE
 
 # ─── HTML TEMPLATE ───────────────────────────────────────────────────────────
 
-def render_page(total_rows, last_markets, recent_gaps):
+def render_page(total_rows, last_markets, recent_gaps, recent_resolved):
     rows_html = "".join(
         f"<tr><td>{r['timestamp']}</td><td class='q'>{r['question']}</td>"
         f"<td>{r['yes_price']}</td><td>{r['no_price']}</td>"
@@ -32,6 +33,16 @@ def render_page(total_rows, last_markets, recent_gaps):
         f"<td class='{'up' if float(g['move']) > 0 else 'dn'}'>{float(g['move']):+.4f}</td></tr>"
         for g in recent_gaps
     ) or "<tr><td colspan='5' class='none'>No gaps detected yet</td></tr>"
+
+    def outcome_badge(r):
+        o = float(r['outcome'])
+        return "<span class='yes'>YES ✓</span>" if o >= 0.99 else "<span class='no'>NO ✗</span>"
+
+    resolved_html = "".join(
+        f"<tr><td>{r['resolved_at']}</td><td class='q'>{r['question']}</td>"
+        f"<td>{outcome_badge(r)}</td><td>{r['final_yes_price']}</td></tr>"
+        for r in recent_resolved
+    ) or "<tr><td colspan='4' class='none'>No resolved markets yet</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -50,6 +61,8 @@ def render_page(total_rows, last_markets, recent_gaps):
   .q   {{ max-width: 380px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
   .up  {{ color: #3fb950; }}
   .dn  {{ color: #f85149; }}
+  .yes {{ color: #3fb950; font-weight: bold; }}
+  .no  {{ color: #f85149; font-weight: bold; }}
   .badge {{ display: inline-block; background: #1f6feb; color: #fff;
             padding: .2rem .6rem; border-radius: 12px; font-size: 1rem; }}
   .none {{ color: #8b949e; }}
@@ -72,6 +85,12 @@ def render_page(total_rows, last_markets, recent_gaps):
   <tr><th>Timestamp (UTC)</th><th>Question</th><th>Prev YES</th><th>Curr YES</th><th>Move</th></tr>
   {gaps_html}
 </table>
+
+<h2>Recently resolved markets</h2>
+<table>
+  <tr><th>Resolved at (UTC)</th><th>Question</th><th>Outcome</th><th>Final YES price</th></tr>
+  {resolved_html}
+</table>
 </body>
 </html>"""
 
@@ -87,11 +106,13 @@ def read_csv_tail(filepath, headers, n=5):
 
 @app.route("/")
 def index():
-    last_markets, total_rows = read_csv_tail(LOG_FILE,  watcher.LOG_HEADERS,  5)
-    recent_gaps,  _          = read_csv_tail(GAPS_FILE, watcher.GAP_HEADERS, 10)
-    last_markets = list(reversed(last_markets))
-    recent_gaps  = list(reversed(recent_gaps))
-    return render_page(total_rows, last_markets, recent_gaps)
+    last_markets, total_rows = read_csv_tail(LOG_FILE,      watcher.LOG_HEADERS,      5)
+    recent_gaps,  _          = read_csv_tail(GAPS_FILE,     watcher.GAP_HEADERS,     10)
+    recent_resolved, _       = read_csv_tail(RESOLVED_FILE, watcher.RESOLVED_HEADERS, 10)
+    last_markets    = list(reversed(last_markets))
+    recent_gaps     = list(reversed(recent_gaps))
+    recent_resolved = list(reversed(recent_resolved))
+    return render_page(total_rows, last_markets, recent_gaps, recent_resolved)
 
 # ─── BACKGROUND WATCHER ──────────────────────────────────────────────────────
 
