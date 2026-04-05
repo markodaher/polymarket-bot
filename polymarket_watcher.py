@@ -24,9 +24,10 @@ from datetime import datetime, timezone
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
 POLL_INTERVAL_SECONDS = 30        # how often to poll (30s is polite, don't go below 10)
-LOG_FILE = "polymarket_log.csv"
-GAPS_FILE = "polymarket_gaps.csv"
-RESOLVED_FILE = "polymarket_resolved.csv"
+_DATA_DIR     = os.environ.get("DATA_DIR", "/app")
+LOG_FILE      = os.path.join(_DATA_DIR, "polymarket_log.csv")
+GAPS_FILE     = os.path.join(_DATA_DIR, "polymarket_gaps.csv")
+RESOLVED_FILE = os.path.join(_DATA_DIR, "polymarket_resolved.csv")
 ALERT_THRESHOLD = 0.05            # flag moves >= 5 cents in one cycle
 MAX_MARKETS = 50                  # how many markets to track per poll
 RESOLVE_CHECK_AFTER = 3          # cycles a market must be absent before checking resolution
