@@ -24,6 +24,7 @@ from flask import Flask, jsonify, request, send_file
 import anthropic
 
 import backfill_resolved
+import paper_trader
 import polymarket_watcher as watcher
 import signal_engine
 
@@ -118,6 +119,7 @@ def render_page(total_rows, last_markets, recent_gaps, recent_resolved, recent_s
 <nav>
   <a href="/health">⚡ Health</a>
   <a href="/signals">📡 Signals</a>
+  <a href="/paper">💰 Paper Trades</a>
   <a href="/download/logs">⬇ logs.csv</a>
   <a href="/download/gaps">⬇ gaps.csv</a>
   <a href="/download/resolved">⬇ resolved.csv</a>
@@ -315,6 +317,124 @@ def signals_page():
 </html>"""
 
 
+@app.route("/paper")
+def paper_page():
+    trades = paper_trader.load_trades()
+    balance = paper_trader.read_balance()
+
+    closed  = [t for t in trades if t["status"] in ("won", "lost")]
+    wins    = sum(1 for t in closed if t["status"] == "won")
+    win_rate = (wins / len(closed) * 100) if closed else 0.0
+
+    total_staked  = sum(float(t["stake"]) for t in closed)
+    total_returned = sum(float(t["potential_payout"]) for t in closed if t["status"] == "won")
+    net_pnl = round(total_returned - total_staked, 4)
+
+    # newest first
+    rows_html = ""
+    for t in reversed(trades):
+        st = t["status"]
+        if st == "won":
+            row_cls, badge = "won-row", "<span class='yes'>WON ✓</span>"
+            pnl_str = f"+${float(t['potential_payout']) - float(t['stake']):.2f}"
+            pnl_cls = "up"
+        elif st == "lost":
+            row_cls, badge = "lost-row", "<span class='no'>LOST ✗</span>"
+            pnl_str = f"-${float(t['stake']):.2f}"
+            pnl_cls = "dn"
+        else:
+            row_cls, badge = "open-row", "<span class='open'>OPEN ●</span>"
+            pnl_str = "—"
+            pnl_cls = ""
+
+        side_cls = "yes" if t["side"] == "YES" else "no"
+        rows_html += (
+            f"<tr class='{row_cls}'>"
+            f"<td>{t['timestamp']}</td>"
+            f"<td class='q'>{t['question']}</td>"
+            f"<td class='{side_cls}'>{t['side']}</td>"
+            f"<td>{float(t['entry_price']):.2f}</td>"
+            f"<td>${float(t['potential_payout']):.2f}</td>"
+            f"<td>{badge}</td>"
+            f"<td class='{pnl_cls}'>{pnl_str}</td>"
+            f"</tr>"
+        )
+    if not rows_html:
+        rows_html = "<tr><td colspan='7' class='none'>No trades yet</td></tr>"
+
+    pnl_cls = "up" if net_pnl >= 0 else "dn"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="30">
+<title>Paper Trades — Polymarket</title>
+<style>
+  body {{ font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 2rem; }}
+  h1   {{ color: #58a6ff; margin-bottom: .25rem; }}
+  .sub {{ color: #8b949e; font-size: .85rem; margin-bottom: 2rem; }}
+  h2   {{ color: #58a6ff; margin: 1.5rem 0 .5rem; }}
+  table {{ border-collapse: collapse; width: 100%; max-width: 980px; }}
+  th, td {{ text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #21262d; font-size: .85rem; }}
+  th   {{ color: #8b949e; }}
+  .q   {{ max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .up  {{ color: #3fb950; }}  .dn {{ color: #f85149; }}
+  .yes {{ color: #3fb950; font-weight: bold; }}
+  .no  {{ color: #f85149; font-weight: bold; }}
+  .open {{ color: #e3b341; font-weight: bold; }}
+  .won-row  td {{ background: rgba(63,185,80,.07); }}
+  .lost-row td {{ background: rgba(248,81,73,.07); }}
+  .open-row td {{ background: rgba(227,179,65,.05); }}
+  .badge {{ display:inline-block; background:#1f6feb; color:#fff; padding:.2rem .6rem; border-radius:12px; font-size:1rem; }}
+  .stat  {{ display:inline-block; margin-right:2rem; }}
+  .stat .val {{ font-size:1.4rem; font-weight:bold; }}
+  .stat .lbl {{ font-size:.8rem; color:#8b949e; }}
+  .none {{ color: #8b949e; }}
+  nav  {{ margin-bottom: 1.5rem; font-size: .85rem; }}
+  nav a {{ color: #58a6ff; margin-right: 1.2rem; text-decoration: none; }}
+  nav a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>Paper Trading</h1>
+<div class="sub">Auto-refreshes every 30 s &nbsp;·&nbsp; {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</div>
+<nav>
+  <a href="/">⬅ Dashboard</a>
+  <a href="/signals">📡 Signals</a>
+</nav>
+
+<div style="margin-bottom:2rem">
+  <div class="stat">
+    <div class="val">${paper_trader.STARTING_BALANCE:.2f}</div>
+    <div class="lbl">Starting balance</div>
+  </div>
+  <div class="stat">
+    <div class="val {'up' if balance >= paper_trader.STARTING_BALANCE else 'dn'}">${balance:.2f}</div>
+    <div class="lbl">Current balance</div>
+  </div>
+  <div class="stat">
+    <div class="val {pnl_cls}">{'+' if net_pnl >= 0 else ''}${net_pnl:.2f}</div>
+    <div class="lbl">Net P&amp;L</div>
+  </div>
+  <div class="stat">
+    <div class="val">{win_rate:.1f}%</div>
+    <div class="lbl">Win rate ({wins}/{len(closed)} closed)</div>
+  </div>
+  <div class="stat">
+    <div class="val">{sum(1 for t in trades if t['status'] == 'open')}</div>
+    <div class="lbl">Open trades</div>
+  </div>
+</div>
+
+<h2>Trade history &nbsp;<span class="badge">{len(trades)} total</span></h2>
+<table>
+  <tr><th>Timestamp (UTC)</th><th>Question</th><th>Side</th><th>Entry</th><th>Potential payout</th><th>Result</th><th>P&amp;L</th></tr>
+  {rows_html}
+</table>
+</body>
+</html>"""
+
+
 @app.route("/upload/resolved", methods=["GET", "POST"])
 def upload_resolved():
     if request.method == "GET":
@@ -437,6 +557,18 @@ if __name__ == "__main__":
 
     # 3. Start signal engine with auto-restart (no-ops if ANTHROPIC_API_KEY is unset)
     threading.Thread(target=_run_signal_engine, daemon=True).start()
+
+    # 4. Start paper trader with auto-restart
+    def _run_paper_trader():
+        backoff = 5
+        while True:
+            try:
+                paper_trader.watch_loop()
+            except Exception as e:
+                print(f"[PAPER] Crashed: {e} — retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+    threading.Thread(target=_run_paper_trader, daemon=True).start()
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
