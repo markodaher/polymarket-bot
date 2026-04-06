@@ -21,8 +21,11 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request, send_file
 
+import anthropic
+
 import backfill_resolved
 import polymarket_watcher as watcher
+import signal_engine
 
 app = Flask(__name__)
 
@@ -395,6 +398,23 @@ def _run_watcher_with_restart():
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
+# ─── BACKGROUND SIGNAL ENGINE ────────────────────────────────────────────────
+
+def _run_signal_engine():
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("[SIGNAL] ANTHROPIC_API_KEY not set — signal engine disabled.")
+        return
+    client = anthropic.Anthropic(api_key=api_key)
+    backoff = 5
+    while True:
+        try:
+            signal_engine.watch_loop(client)
+        except Exception as e:
+            print(f"[SIGNAL] Crashed: {e} — retrying in {backoff}s")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+
 # ─── STARTUP BACKFILL ────────────────────────────────────────────────────────
 
 def _run_backfill():
@@ -414,6 +434,9 @@ if __name__ == "__main__":
     # 2. Start watcher with auto-restart
     _watcher_thread = threading.Thread(target=_run_watcher_with_restart, daemon=True)
     _watcher_thread.start()
+
+    # 3. Start signal engine with auto-restart (no-ops if ANTHROPIC_API_KEY is unset)
+    threading.Thread(target=_run_signal_engine, daemon=True).start()
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

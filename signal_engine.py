@@ -29,10 +29,11 @@ import anthropic
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
-_DATA_DIR     = os.environ.get("DATA_DIR", os.path.dirname(__file__) or ".")
-GAPS_FILE     = os.path.join(_DATA_DIR, "polymarket_gaps.csv")
-LOG_FILE      = os.path.join(_DATA_DIR, "polymarket_log.csv")
-SIGNALS_FILE  = os.path.join(_DATA_DIR, "signals.csv")
+_DATA_DIR      = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+GAPS_FILE      = os.path.join(_DATA_DIR, "polymarket_gaps.csv")
+LOG_FILE       = os.path.join(_DATA_DIR, "polymarket_log.csv")
+SIGNALS_FILE   = os.path.join(_DATA_DIR, "signals.csv")
+EVALUATED_FILE = os.path.join(_DATA_DIR, "signal_evaluated.txt")  # all evaluated gap keys
 GAP_HEADERS   = ["timestamp", "market_id", "question", "prev_yes", "curr_yes", "move"]
 SIGNAL_HEADERS = [
     "timestamp", "market_id", "question",
@@ -64,12 +65,33 @@ def init_signals_csv():
             csv.DictWriter(f, fieldnames=SIGNAL_HEADERS).writeheader()
 
 
-def load_processed_keys():
-    """Return set of (market_id, timestamp) already written to signals.csv."""
-    if not os.path.exists(SIGNALS_FILE):
-        return set()
-    with open(SIGNALS_FILE, newline="", encoding="utf-8") as f:
-        return {(r["market_id"], r["timestamp"]) for r in csv.DictReader(f)}
+def load_evaluated_keys():
+    """
+    Return set of (market_id, timestamp) for all gap events already evaluated
+    this session — both those that fired a signal and those that didn't.
+    Persisted in signal_evaluated.txt so restarts don't re-burn API calls.
+    """
+    keys = set()
+    # Pull from signals.csv (definitive source for fired signals)
+    if os.path.exists(SIGNALS_FILE):
+        with open(SIGNALS_FILE, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                keys.add((r["market_id"], r["timestamp"]))
+    # Pull from evaluated log (gaps that were checked but didn't fire)
+    if os.path.exists(EVALUATED_FILE):
+        with open(EVALUATED_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "|" in line:
+                    mid, ts = line.split("|", 1)
+                    keys.add((mid, ts))
+    return keys
+
+
+def mark_evaluated(market_id, timestamp):
+    """Persist a gap key so it's never re-evaluated after a restart."""
+    with open(EVALUATED_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{market_id}|{timestamp}\n")
 
 
 def append_signal(row):
@@ -149,6 +171,7 @@ def process_gaps(client, gaps, processed_keys, vol_map):
             continue
 
         processed_keys.add(key)
+        mark_evaluated(g["market_id"], g["timestamp"])  # persist immediately
         new_processed += 1
 
         question = g["question"]
@@ -210,6 +233,33 @@ def process_gaps(client, gaps, processed_keys, vol_map):
     return new_processed, new_signals
 
 
+# ─── WATCH LOOP (callable from dashboard.py thread) ──────────────────────────
+
+def watch_loop(client):
+    """
+    Infinite loop: every WATCH_INTERVAL seconds, pick up new gap events,
+    evaluate them through Claude, and write qualifying signals.
+    Called directly by dashboard.py's background thread.
+    """
+    init_signals_csv()
+    cycle = 0
+    while True:
+        cycle += 1
+        evaluated_keys = load_evaluated_keys()
+        vol_map        = load_volume_map()
+        gaps           = load_gaps()
+        pending        = [g for g in gaps
+                          if (g["market_id"], g["timestamp"]) not in evaluated_keys]
+
+        print(f"[SIGNAL Cycle {cycle}] {len(gaps)} gaps | {len(pending)} new | {len(vol_map)} markets")
+
+        if pending:
+            processed, signals = process_gaps(client, pending, evaluated_keys, vol_map)
+            print(f"[SIGNAL] Done: {processed} evaluated | {signals} signals written")
+
+        time.sleep(WATCH_INTERVAL)
+
+
 # ─── ENTRY POINT ─────────────────────────────────────────────────────────────
 
 def main():
@@ -240,15 +290,16 @@ def main():
     cycle = 0
     while True:
         cycle += 1
-        processed_keys = load_processed_keys()
+        evaluated_keys = load_evaluated_keys()
         vol_map        = load_volume_map()
         gaps           = load_gaps()
-        pending        = [g for g in gaps if (g["market_id"], g["timestamp"]) not in processed_keys]
+        pending        = [g for g in gaps
+                          if (g["market_id"], g["timestamp"]) not in evaluated_keys]
 
         print(f"\n[Cycle {cycle}] {len(gaps)} total gaps | {len(pending)} unprocessed | {len(vol_map)} markets with volume")
 
         if pending:
-            processed, signals = process_gaps(client, pending, processed_keys, vol_map)
+            processed, signals = process_gaps(client, pending, evaluated_keys, vol_map)
             print(f"\n  Done: {processed} evaluated | {signals} signals written")
         else:
             print("  Nothing new to process.")
