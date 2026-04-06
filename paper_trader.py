@@ -106,19 +106,32 @@ def load_resolved_map():
 
 # ─── TRADE LOGIC ─────────────────────────────────────────────────────────────
 
+MAX_PAYOUT_MULTIPLE = 20   # cap: never pay out more than 20x stake
+
 def open_trade(signal, balance):
     """
     Create a new paper trade row from a signal dict.
     Returns (trade_row, updated_balance).
+
+    Payout model (binary prediction market):
+      YES trade: payout = stake / p          where p = polymarket YES price
+      NO  trade: payout = stake / (1 - p)   where p = polymarket YES price
+    Capped at MAX_PAYOUT_MULTIPLE × stake to avoid unrealistic payouts on
+    near-zero priced markets.
     """
-    side         = signal["recommended_side"]          # "YES" or "NO"
-    mkt_price    = float(signal["polymarket_price"])   # YES price on polymarket
+    side      = signal["recommended_side"]          # "YES" or "NO"
+    mkt_price = float(signal["polymarket_price"])   # polymarket YES price
 
-    # entry_price is the price of the side we're buying
-    entry_price = mkt_price if side == "YES" else round(1.0 - mkt_price, 4)
-    entry_price = max(entry_price, 0.01)               # guard against 0-price
+    # Price of the side we're buying
+    if side == "YES":
+        entry_price = mkt_price
+    else:
+        entry_price = 1.0 - mkt_price
 
-    potential_payout = round(STAKE / entry_price, 4)
+    entry_price = max(round(entry_price, 4), 0.01)  # guard against zero
+
+    raw_payout       = STAKE / entry_price
+    potential_payout = round(min(raw_payout, STAKE * MAX_PAYOUT_MULTIPLE), 4)
 
     trade = {
         "timestamp"       : signal["timestamp"],
