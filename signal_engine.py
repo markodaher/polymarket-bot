@@ -23,7 +23,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import anthropic
 
@@ -41,12 +41,13 @@ SIGNAL_HEADERS = [
     "recommended_side", "confidence",
 ]
 
-MODEL             = "claude-sonnet-4-20250514"
-EDGE_THRESHOLD    = 0.15   # minimum edge to flag as a signal
-MIN_CONFIDENCE    = 0.50   # minimum confidence score
-MIN_VOLUME        = 500    # minimum market volume ($)
-REQUEST_DELAY     = 0.4    # seconds between Claude calls
-WATCH_INTERVAL    = 60     # seconds between gap-file scans in --watch mode
+MODEL               = "claude-sonnet-4-20250514"
+EDGE_THRESHOLD      = 0.15   # minimum edge to flag as a signal
+MIN_CONFIDENCE      = 0.50   # minimum confidence score
+MIN_VOLUME          = 500    # minimum market volume ($)
+MAX_DAYS_TO_RESOLVE = 7      # skip markets resolving more than 7 days out
+REQUEST_DELAY       = 0.4    # seconds between Claude calls
+WATCH_INTERVAL      = 60     # seconds between gap-file scans in --watch mode
 
 SYSTEM_PROMPT = """\
 You are a prediction market probability estimator. You will be given a binary \
@@ -99,18 +100,29 @@ def append_signal(row):
         csv.DictWriter(f, fieldnames=SIGNAL_HEADERS).writerow(row)
 
 
-def load_volume_map():
-    """Return {market_id: latest_volume} from polymarket_log.csv."""
+def load_market_meta():
+    """
+    Return ({market_id: volume}, {market_id: end_date_str}) from polymarket_log.csv.
+    Uses the latest row seen per market (last row wins).
+    end_date_str is "YYYY-MM-DD" or "" if not logged yet.
+    """
     vol = {}
+    end_dates = {}
     if not os.path.exists(LOG_FILE):
-        return vol
+        return vol, end_dates
     with open(LOG_FILE, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            mid = row.get("market_id", "")
+            if not mid:
+                continue
             try:
-                vol[row["market_id"]] = float(row["volume"])
+                vol[mid] = float(row["volume"])
             except (KeyError, ValueError):
                 pass
-    return vol
+            ed = row.get("end_date", "").strip()
+            if ed:
+                end_dates[mid] = ed
+    return vol, end_dates
 
 
 def load_gaps():
@@ -158,12 +170,15 @@ def ask_claude(client, question, prev_yes, move):
 
 # ─── SIGNAL LOGIC ────────────────────────────────────────────────────────────
 
-def process_gaps(client, gaps, processed_keys, vol_map):
+def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
     new_signals = 0
     new_processed = 0
     filtered_vol = 0
+    filtered_date = 0
     filtered_edge = 0
     filtered_conf = 0
+
+    today = datetime.now(timezone.utc).date()
 
     for g in gaps:
         key = (g["market_id"], g["timestamp"])
@@ -184,6 +199,18 @@ def process_gaps(client, gaps, processed_keys, vol_map):
         if volume < MIN_VOLUME:
             filtered_vol += 1
             continue
+
+        # Resolution date filter — skip markets resolving too far out
+        end_date_str = end_date_map.get(g["market_id"], "")
+        if end_date_str:
+            try:
+                end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                days_out = (end_date - today).days
+                if days_out > MAX_DAYS_TO_RESOLVE:
+                    filtered_date += 1
+                    continue
+            except ValueError:
+                pass  # malformed date — don't filter
 
         short_q = question[:52]
         print(f"  [{g['timestamp']}] {short_q!r:<54} prev={prev_yes:.2f} curr={curr_yes:.2f} move={move:+.2f}",
@@ -227,8 +254,11 @@ def process_gaps(client, gaps, processed_keys, vol_map):
 
         time.sleep(REQUEST_DELAY)
 
-    if filtered_vol:
-        print(f"  Skipped {filtered_vol} gaps below volume threshold (${MIN_VOLUME:,})")
+    skips = []
+    if filtered_vol:  skips.append(f"{filtered_vol} thin volume (<${MIN_VOLUME:,})")
+    if filtered_date: skips.append(f"{filtered_date} too far out (>{MAX_DAYS_TO_RESOLVE}d)")
+    if skips:
+        print(f"  Skipped: {', '.join(skips)}")
 
     return new_processed, new_signals
 
@@ -245,16 +275,16 @@ def watch_loop(client):
     cycle = 0
     while True:
         cycle += 1
-        evaluated_keys = load_evaluated_keys()
-        vol_map        = load_volume_map()
-        gaps           = load_gaps()
-        pending        = [g for g in gaps
-                          if (g["market_id"], g["timestamp"]) not in evaluated_keys]
+        evaluated_keys    = load_evaluated_keys()
+        vol_map, end_dates = load_market_meta()
+        gaps              = load_gaps()
+        pending           = [g for g in gaps
+                             if (g["market_id"], g["timestamp"]) not in evaluated_keys]
 
         print(f"[SIGNAL Cycle {cycle}] {len(gaps)} gaps | {len(pending)} new | {len(vol_map)} markets")
 
         if pending:
-            processed, signals = process_gaps(client, pending, evaluated_keys, vol_map)
+            processed, signals = process_gaps(client, pending, evaluated_keys, vol_map, end_dates)
             print(f"[SIGNAL] Done: {processed} evaluated | {signals} signals written")
 
         time.sleep(WATCH_INTERVAL)
@@ -290,16 +320,16 @@ def main():
     cycle = 0
     while True:
         cycle += 1
-        evaluated_keys = load_evaluated_keys()
-        vol_map        = load_volume_map()
-        gaps           = load_gaps()
-        pending        = [g for g in gaps
-                          if (g["market_id"], g["timestamp"]) not in evaluated_keys]
+        evaluated_keys     = load_evaluated_keys()
+        vol_map, end_dates = load_market_meta()
+        gaps               = load_gaps()
+        pending            = [g for g in gaps
+                              if (g["market_id"], g["timestamp"]) not in evaluated_keys]
 
         print(f"\n[Cycle {cycle}] {len(gaps)} total gaps | {len(pending)} unprocessed | {len(vol_map)} markets with volume")
 
         if pending:
-            processed, signals = process_gaps(client, pending, evaluated_keys, vol_map)
+            processed, signals = process_gaps(client, pending, evaluated_keys, vol_map, end_dates)
             print(f"\n  Done: {processed} evaluated | {signals} signals written")
         else:
             print("  Nothing new to process.")

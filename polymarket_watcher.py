@@ -93,7 +93,7 @@ def fetch_market_prices(condition_id):
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
-LOG_HEADERS      = ["timestamp", "market_id", "question", "tag", "yes_price", "no_price", "volume"]
+LOG_HEADERS      = ["timestamp", "market_id", "question", "tag", "yes_price", "no_price", "volume", "end_date"]
 GAP_HEADERS      = ["timestamp", "market_id", "question", "prev_yes", "curr_yes", "move"]
 RESOLVED_HEADERS = ["market_id", "question", "resolved_at", "outcome", "final_yes_price"]
 
@@ -224,6 +224,7 @@ def main():
                 continue
 
             # Log to main CSV
+            end_date = (m.get("endDate") or "")[:10]  # keep date portion only: "2026-04-09"
             row = {
                 "timestamp" : now,
                 "market_id" : market_id,
@@ -231,7 +232,8 @@ def main():
                 "tag"       : tag_str,
                 "yes_price" : yes_price,
                 "no_price"  : no_price,
-                "volume"    : volume
+                "volume"    : volume,
+                "end_date"  : end_date,
             }
             append_row(LOG_FILE, LOG_HEADERS, row)
             logged += 1
