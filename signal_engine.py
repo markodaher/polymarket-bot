@@ -46,6 +46,8 @@ EDGE_THRESHOLD      = 0.15   # minimum edge to flag as a signal
 MIN_CONFIDENCE      = 0.50   # minimum confidence score
 MIN_VOLUME          = 500    # minimum market volume ($)
 MAX_DAYS_TO_RESOLVE = 7      # skip markets resolving more than 7 days out
+MIN_PRICE           = 0.05   # skip markets with YES price below this (near-certain NO)
+MAX_PRICE           = 0.95   # skip markets with YES price above this (near-certain YES)
 REQUEST_DELAY       = 0.4    # seconds between Claude calls
 WATCH_INTERVAL      = 60     # seconds between gap-file scans in --watch mode
 
@@ -175,6 +177,7 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
     new_processed = 0
     filtered_vol = 0
     filtered_date = 0
+    filtered_price = 0
     filtered_edge = 0
     filtered_conf = 0
 
@@ -211,6 +214,11 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
                     continue
             except ValueError:
                 pass  # malformed date — don't filter
+
+        # Price filter — skip near-certain markets (outcome already decided)
+        if curr_yes < MIN_PRICE or curr_yes > MAX_PRICE:
+            filtered_price += 1
+            continue
 
         short_q = question[:52]
         print(f"  [{g['timestamp']}] {short_q!r:<54} prev={prev_yes:.2f} curr={curr_yes:.2f} move={move:+.2f}",
@@ -255,8 +263,9 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
         time.sleep(REQUEST_DELAY)
 
     skips = []
-    if filtered_vol:  skips.append(f"{filtered_vol} thin volume (<${MIN_VOLUME:,})")
-    if filtered_date: skips.append(f"{filtered_date} too far out (>{MAX_DAYS_TO_RESOLVE}d)")
+    if filtered_vol:   skips.append(f"{filtered_vol} thin volume (<${MIN_VOLUME:,})")
+    if filtered_date:  skips.append(f"{filtered_date} too far out (>{MAX_DAYS_TO_RESOLVE}d)")
+    if filtered_price: skips.append(f"{filtered_price} near-certain price (<{MIN_PRICE} or >{MAX_PRICE})")
     if skips:
         print(f"  Skipped: {', '.join(skips)}")
 
