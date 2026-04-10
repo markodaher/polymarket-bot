@@ -51,6 +51,15 @@ MAX_PRICE           = 0.95   # skip markets with YES price above this (near-cert
 REQUEST_DELAY       = 0.4    # seconds between Claude calls
 WATCH_INTERVAL      = 60     # seconds between gap-file scans in --watch mode
 
+# Keywords indicating an in-progress or already-completed event
+_IN_PROGRESS_PATTERNS = re.compile(
+    r"\b(set\s+\d|game\s+\d|map\s+\d|half\s+\d|quarter\s+\d|round\s+\d|period\s+\d"
+    r"|1st\s+half|2nd\s+half|1st\s+quarter|inning\s+\d"
+    r"|exact\s+score|correct\s+score"
+    r"|\d+-\d+)\b",
+    re.IGNORECASE,
+)
+
 SYSTEM_PROMPT = """\
 You are a prediction market probability estimator. You will be given a binary \
 market question and the market's YES price BEFORE a sudden price move occurred. \
@@ -58,6 +67,57 @@ Your job is to estimate the TRUE probability that the outcome is YES, independen
 of any crowd overreaction or underreaction.
 
 Respond with ONLY a number between 0 and 1 (e.g. 0.72). No explanation, no text."""
+
+
+# ─── QUESTION FILTER ─────────────────────────────────────────────────────────
+
+_DATE_IN_QUESTION = re.compile(
+    r"\b(\d{4}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s+\d{4})?)\b",
+    re.IGNORECASE,
+)
+
+_MONTH_MAP = {
+    "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+    "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+}
+
+def _parse_date_in_question(text):
+    """
+    Return the first date found in text as a date object, or None.
+    Handles: 2026-04-09, April 9, Apr 9, Apr 9 2026, 9 Apr, 9 Apr 2026.
+    """
+    for m in _DATE_IN_QUESTION.finditer(text):
+        raw = m.group(0).strip()
+        # ISO format
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+        # "Month D, YYYY" / "Month D"
+        for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d", "%b %d",
+                    "%d %B %Y", "%d %b %Y", "%d %B", "%d %b"):
+            try:
+                d = datetime.strptime(raw, fmt).date()
+                # If year is missing, assume current year
+                if d.year == 1900:
+                    d = d.replace(year=datetime.now(timezone.utc).year)
+                return d
+            except ValueError:
+                pass
+    return None
+
+
+def question_is_stale(question, today):
+    """
+    Return True if the question should be filtered out because it refers to
+    an in-progress game segment or a specific date that is in the past.
+    """
+    if _IN_PROGRESS_PATTERNS.search(question):
+        return True
+    d = _parse_date_in_question(question)
+    if d is not None and d < today:
+        return True
+    return False
 
 
 # ─── CSV HELPERS ─────────────────────────────────────────────────────────────
@@ -178,6 +238,7 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
     filtered_vol = 0
     filtered_date = 0
     filtered_price = 0
+    filtered_stale = 0
     filtered_edge = 0
     filtered_conf = 0
 
@@ -218,6 +279,11 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
         # Price filter — skip near-certain markets (outcome already decided)
         if curr_yes < MIN_PRICE or curr_yes > MAX_PRICE:
             filtered_price += 1
+            continue
+
+        # Question filter — skip in-progress game segments or past-date markets
+        if question_is_stale(question, today):
+            filtered_stale += 1
             continue
 
         short_q = question[:52]
@@ -266,6 +332,7 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
     if filtered_vol:   skips.append(f"{filtered_vol} thin volume (<${MIN_VOLUME:,})")
     if filtered_date:  skips.append(f"{filtered_date} too far out (>{MAX_DAYS_TO_RESOLVE}d)")
     if filtered_price: skips.append(f"{filtered_price} near-certain price (<{MIN_PRICE} or >{MAX_PRICE})")
+    if filtered_stale: skips.append(f"{filtered_stale} stale/in-progress question")
     if skips:
         print(f"  Skipped: {', '.join(skips)}")
 

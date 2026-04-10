@@ -42,6 +42,7 @@ BALANCE_FILE    = os.path.join(_DATA_DIR, "paper_balance.txt")
 
 STARTING_BALANCE = 30.00
 STAKE            = 1.00     # fixed stake per trade ($)
+DRY_RUN          = True     # if True, log trades but do not touch the balance
 WATCH_INTERVAL   = 60       # seconds between cycles
 
 TRADE_HEADERS = [
@@ -143,14 +144,15 @@ def open_trade(signal, balance):
         "potential_payout": potential_payout,
         "status"          : "open",
     }
-    new_balance = round(balance - STAKE, 4)
+    new_balance = balance if DRY_RUN else round(balance - STAKE, 4)
     return trade, new_balance
 
 
 def settle_trades(trades, resolved_map, balance):
     """
     For each open trade whose market is in resolved_map, determine won/lost,
-    update balance, and mark the trade. Returns (updated_trades, new_balance).
+    update balance (unless DRY_RUN), and mark the trade.
+    Returns (updated_trades, new_balance, changed).
     """
     changed = False
     for t in trades:
@@ -165,11 +167,14 @@ def settle_trades(trades, resolved_map, balance):
 
         if won:
             t["status"] = "won"
-            balance = round(balance + float(t["potential_payout"]), 4)
-            print(f"  [PAPER] WON  +${float(t['potential_payout']):.2f}  {t['question'][:55]!r}")
+            if not DRY_RUN:
+                balance = round(balance + float(t["potential_payout"]), 4)
+            dry_tag = " [DRY RUN]" if DRY_RUN else ""
+            print(f"  [PAPER] WON  +${float(t['potential_payout']):.2f}{dry_tag}  {t['question'][:55]!r}")
         else:
             t["status"] = "lost"
-            print(f"  [PAPER] LOST -${float(t['stake']):.2f}  {t['question'][:55]!r}")
+            dry_tag = " [DRY RUN]" if DRY_RUN else ""
+            print(f"  [PAPER] LOST -${float(t['stake']):.2f}{dry_tag}  {t['question'][:55]!r}")
         changed = True
 
     return trades, balance, changed
@@ -182,7 +187,7 @@ def watch_loop():
     init_trades_csv()
     if not os.path.exists(BALANCE_FILE):
         write_balance(STARTING_BALANCE)
-        print(f"[PAPER] Starting balance: ${STARTING_BALANCE:.2f}")
+    print(f"[PAPER] Starting — balance: ${read_balance():.2f}  dry_run={DRY_RUN}")
 
     cycle = 0
     while True:
@@ -208,9 +213,10 @@ def watch_loop():
             trades.append(trade)
             existing_keys.add(key)
             new_trades += 1
+            dry_tag = " [DRY RUN]" if DRY_RUN else ""
             print(f"  [PAPER] OPEN {trade['side']:<3}  entry={trade['entry_price']:.2f}"
                   f"  payout=${trade['potential_payout']:.2f}"
-                  f"  bal=${balance:.2f}  {trade['question'][:45]!r}")
+                  f"  bal=${balance:.2f}{dry_tag}  {trade['question'][:45]!r}")
 
         # ── Settle resolved trades ────────────────────────────────────────────
         trades, balance, settled = settle_trades(trades, resolved_map, balance)
