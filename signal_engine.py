@@ -60,6 +60,59 @@ _IN_PROGRESS_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# ─── CATEGORY WHITELIST / BLACKLIST ──────────────────────────────────────────
+
+# Checked first — any match means instant skip (no whitelist check needed)
+_BLACKLIST = [
+    "set 1", "set 2", "set 3",
+    "game 1", "game 2",
+    "map 1", "map 2",
+    "o/u",
+    "temperature", "highest temp",
+    "views", "posts from",
+    "up or down",
+]
+
+# At least one keyword must match for the question to pass through
+_WHITELIST = {
+    "politics/macro": [
+        "election", "president", "congress", "senate",
+        "fed ", "interest rate", "inflation", "gdp",
+        "trump", "tariff", "war", "ceasefire", "sanction",
+    ],
+    "crypto macro": [
+        "bitcoin", "ethereum", "crypto",
+        "btc", "eth", "usdt", "market cap",
+    ],
+    "major awards/appointments": [
+        "nobel", "fields medal", "oscar",
+        "appointed", "resign", "fired",
+    ],
+    "major sports outcomes": [
+        "win the", "champion", "qualify", "playoffs",
+        "super bowl", "world cup", "nba finals",
+    ],
+}
+
+
+def category_check(question):
+    """
+    Returns (passed: bool, reason: str).
+    Blacklist is checked first; then whitelist must match at least one keyword.
+    """
+    q_lower = question.lower()
+
+    for kw in _BLACKLIST:
+        if kw in q_lower:
+            return False, f"blacklisted keyword: '{kw}'"
+
+    for category, keywords in _WHITELIST.items():
+        for kw in keywords:
+            if kw in q_lower:
+                return True, category
+
+    return False, "no whitelist match"
+
 SYSTEM_PROMPT = """\
 You are a prediction market probability estimator. You will be given a binary \
 market question and the market's YES price BEFORE a sudden price move occurred. \
@@ -239,6 +292,7 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
     filtered_date = 0
     filtered_price = 0
     filtered_stale = 0
+    filtered_category = 0
     filtered_edge = 0
     filtered_conf = 0
 
@@ -286,6 +340,13 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
             filtered_stale += 1
             continue
 
+        # Category whitelist / blacklist
+        passed, reason = category_check(question)
+        if not passed:
+            filtered_category += 1
+            print(f"  [SKIP category] {reason} — {question[:60]!r}")
+            continue
+
         short_q = question[:52]
         print(f"  [{g['timestamp']}] {short_q!r:<54} prev={prev_yes:.2f} curr={curr_yes:.2f} move={move:+.2f}",
               end=" ", flush=True)
@@ -329,10 +390,11 @@ def process_gaps(client, gaps, processed_keys, vol_map, end_date_map):
         time.sleep(REQUEST_DELAY)
 
     skips = []
-    if filtered_vol:   skips.append(f"{filtered_vol} thin volume (<${MIN_VOLUME:,})")
-    if filtered_date:  skips.append(f"{filtered_date} too far out (>{MAX_DAYS_TO_RESOLVE}d)")
-    if filtered_price: skips.append(f"{filtered_price} near-certain price (<{MIN_PRICE} or >{MAX_PRICE})")
-    if filtered_stale: skips.append(f"{filtered_stale} stale/in-progress question")
+    if filtered_vol:      skips.append(f"{filtered_vol} thin volume (<${MIN_VOLUME:,})")
+    if filtered_date:     skips.append(f"{filtered_date} too far out (>{MAX_DAYS_TO_RESOLVE}d)")
+    if filtered_price:    skips.append(f"{filtered_price} near-certain price (<{MIN_PRICE} or >{MAX_PRICE})")
+    if filtered_stale:    skips.append(f"{filtered_stale} stale/in-progress question")
+    if filtered_category: skips.append(f"{filtered_category} category filtered")
     if skips:
         print(f"  Skipped: {', '.join(skips)}")
 
